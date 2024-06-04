@@ -26,7 +26,7 @@ int necp_session_action(int necp_fd, uint32_t action, uint8_t *in_buffer, size_t
 #define SYSCALL_NECP_SESSION_ACTION 0x20B
 
 extern char **environ;
-bool gTweaksEnabled = false;
+bool gShouldFixFork = false;
 bool gFullyDebugged = false;
 
 int ptrace(int request, pid_t pid, caddr_t addr, int data);
@@ -349,7 +349,7 @@ int ptrace_hook(int request, pid_t pid, caddr_t addr, int data)
 
 void loadForkFix(void)
 {
-	if (gTweaksEnabled) {
+	if (gShouldFixFork) {
 		static dispatch_once_t onceToken;
 		dispatch_once (&onceToken, ^{
 			// If tweaks have been loaded into this process, we need to load forkfix to ensure forking will work
@@ -364,25 +364,41 @@ void loadForkFix(void)
 pid_t fork_hook(void)
 {
 	loadForkFix();
-	return fork();
+	pid_t ret = fork();
+	if(ret==0 && !gShouldFixFork) {
+		jbclient_platform_set_process_debugged(getpid(), false);
+	}
+	return ret;
 }
 
 pid_t vfork_hook(void)
 {
 	loadForkFix();
-	return vfork();
+	pid_t ret = vfork();
+	if(ret==0 && !gShouldFixFork) {
+		jbclient_platform_set_process_debugged(getpid(), false);
+	}
+	return ret;
 }
 
 pid_t forkpty_hook(int *amaster, char *name, struct termios *termp, struct winsize *winp)
 {
 	loadForkFix();
-	return forkpty(amaster, name, termp, winp);
+	int ret = forkpty(amaster, name, termp, winp);
+	if(ret==0 && !gShouldFixFork) {
+		jbclient_platform_set_process_debugged(getpid(), false);
+	}
+	return ret;
 }
 
 int daemon_hook(int __nochdir, int __noclose)
 {
 	loadForkFix();
-	return daemon(__nochdir, __noclose);
+	int ret = daemon(__nochdir, __noclose);
+	if(ret==0 && !gShouldFixFork) {
+		jbclient_platform_set_process_debugged(getpid(), false);
+	}
+	return ret;
 }
 
 #else
@@ -515,6 +531,7 @@ bool shouldEnableTweaks(void)
 
 //export for PatchLoader
 __attribute__((visibility("default"))) int PLRequiredJIT() {
+	gShouldFixFork = true;
 	return 0;
 }
 
@@ -634,6 +651,33 @@ void redirectDirs(const char* rootdir)
 }
 
 
+extern void* _dyld_get_shared_cache_range(size_t* length);
+
+int syscall_issetugid();
+int new_issetugidhook()
+{
+	void* caller = __builtin_return_address(0);
+
+	size_t length=0;
+	void* start = _dyld_get_shared_cache_range(&length);
+
+	if((uint64_t)caller >= (uint64_t)start  &&  (uint64_t)caller < ((uint64_t)start+length))
+	{
+		return 0;
+	}
+
+	return syscall_issetugid();
+}
+
+void loadPathFix(void)
+{
+	static dispatch_once_t onceToken;
+	dispatch_once (&onceToken, ^{
+		gShouldFixFork = true;
+		litehook_hook_function((void *)&issetugid, (void *)&new_issetugidhook);
+	});
+}
+
 char HOOK_DYLIB_PATH[PATH_MAX] = {0};
 
 __attribute__((constructor)) static void initializer(void)
@@ -643,6 +687,11 @@ __attribute__((constructor)) static void initializer(void)
 	strncpy(HOOK_DYLIB_PATH, di.dli_fname, sizeof(HOOK_DYLIB_PATH));
 
 	jbclient_process_checkin(&JB_RootPath, &JB_BootUUID, &JB_SandboxExtensions, &gFullyDebugged);
+
+	if(issetugid()==1) {
+		//for persona?
+		loadPathFix();
+	}
 
 	redirectDirs(JB_RootPath);
 
@@ -689,7 +738,7 @@ __attribute__((constructor)) static void initializer(void)
 		if (shouldEnableTweaks()) {
 			const char *tweakLoaderPath = JBRootPath("/usr/lib/TweakLoader.dylib");
 			if(access(tweakLoaderPath, F_OK) == 0) {
-				gTweaksEnabled = true;
+				gShouldFixFork = true;
 				void *tweakLoaderHandle = dlopen_hook(tweakLoaderPath, RTLD_NOW);
 				if (tweakLoaderHandle != NULL) {
 					dlclose(tweakLoaderHandle);
@@ -729,20 +778,6 @@ DYLD_INTERPOSE(forkpty_hook, forkpty)
 DYLD_INTERPOSE(daemon_hook, daemon)
 #endif
 
-
-int new_issetugidhook()
-{
-	return 0;
-}
-
-void loadPathFix(void)
-{
-	static dispatch_once_t onceToken;
-	dispatch_once (&onceToken, ^{
-		litehook_hook_function((void *)&issetugid, (void *)&new_issetugidhook);
-	});
-}
-
 uid_t setuid_hook(uid_t uid) {
 	loadPathFix();
 	return setuid(uid);
@@ -751,16 +786,48 @@ uid_t seteuid_hook(uid_t uid) {
 	loadPathFix();
 	return seteuid(uid);
 }
-uid_t setgid_hook(uid_t uid) {
+uid_t setruid_hook(uid_t uid) {
 	loadPathFix();
-	return setgid(uid);
+	return setruid(uid);
 }
-uid_t setegid_hook(uid_t uid) {
+uid_t setreuid_hook(uid_t ruid, uid_t euid) {
 	loadPathFix();
-	return setegid(uid);
+	return setreuid(ruid,euid);
+}
+
+gid_t setgid_hook(gid_t gid) {
+	loadPathFix();
+	return setgid(gid);
+}
+gid_t setegid_hook(gid_t gid) {
+	loadPathFix();
+	return setegid(gid);
+}
+gid_t setrgid_hook(gid_t gid) {
+	loadPathFix();
+	return setrgid(gid);
+}
+gid_t setregid_hook(gid_t rgid, gid_t egid) {
+	loadPathFix();
+	return setregid(rgid,egid);
+}
+
+int	initgroups_hook(const char * user, int group) {
+	loadPathFix();
+	return initgroups(user,group);
+}
+int setgroups_hook(int n, const gid_t* ids) {
+	loadPathFix();
+	return setgroups(n,ids);
 }
 
 DYLD_INTERPOSE(setuid_hook, setuid)
 DYLD_INTERPOSE(seteuid_hook, seteuid)
+DYLD_INTERPOSE(setruid_hook, setruid)
+DYLD_INTERPOSE(setreuid_hook, setreuid)
 DYLD_INTERPOSE(setgid_hook, setgid)
 DYLD_INTERPOSE(setegid_hook, setegid)
+DYLD_INTERPOSE(setrgid_hook, setrgid)
+DYLD_INTERPOSE(setregid_hook, setregid)
+DYLD_INTERPOSE(initgroups_hook, initgroups)
+DYLD_INTERPOSE(setgroups_hook, setgroups)

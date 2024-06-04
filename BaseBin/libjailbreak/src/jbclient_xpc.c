@@ -184,7 +184,7 @@ char *realafpath(const char *restrict path, char *restrict resolved_path)
 	}
 }
 
-int jbclient_trust_binary(const char *binaryPath)
+int jbclient_trust_binary(const char *binaryPath, xpc_object_t preferredArchsArray)
 {
 	if (!binaryPath) return -1;
 
@@ -195,6 +195,9 @@ int jbclient_trust_binary(const char *binaryPath)
 
 	xpc_object_t xargs = xpc_dictionary_create_empty();
 	xpc_dictionary_set_string(xargs, "binary-path", absolutePath);
+	if (preferredArchsArray) {
+		xpc_dictionary_set_value(xargs, "preferred-archs", preferredArchsArray);
+	}
 	xpc_object_t xreply = jbserver_xpc_send(JBS_DOMAIN_SYSTEMWIDE, JBS_SYSTEMWIDE_TRUST_BINARY, xargs);
 	xpc_release(xargs);
 	if (xreply) {
@@ -500,20 +503,6 @@ int jbclient_root_get_sysinfo(xpc_object_t *sysInfoOut)
 	}
 	return -1;
 }
-
-// int jbclient_root_add_cdhash(uint8_t *cdhashData, size_t cdhashLen)
-// {
-// 	xpc_object_t xargs = xpc_dictionary_create_empty();
-// 	xpc_dictionary_set_data(xargs, "cdhash", cdhashData, cdhashLen);
-// 	xpc_object_t xreply = jbserver_xpc_send(JBS_DOMAIN_ROOT, JBS_ROOT_ADD_CDHASH, xargs);
-// 	xpc_release(xargs);
-// 	if (xreply) {
-// 		int64_t result = xpc_dictionary_get_int64(xreply, "result");
-// 		xpc_release(xreply);
-// 		return result;
-// 	}
-// 	return -1;
-// }
 
 int jbclient_root_steal_ucred(uint64_t ucredToSteal, uint64_t *orgUcred)
 {
